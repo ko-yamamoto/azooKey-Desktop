@@ -39,6 +39,62 @@ final class SegmentsManager {
     private var suggestSelectionIndex: Int?
 
     private lazy var zenzaiPersonalizationMode: ConvertRequestOptions.ZenzaiMode.PersonalizationMode? = self.getZenzaiPersonalizationMode()
+    
+    // MARK: - Learning Data Async Processing
+    private let learningQueue = DispatchQueue(label: "com.azookey.learning", qos: .utility)
+    private let learningLock = NSLock()
+    private var pendingLearningUpdates: [Candidate] = []
+    
+    /// 非同期で学習データを更新
+    private func updateLearningDataAsync(_ candidate: Candidate) {
+        learningLock.lock()
+        pendingLearningUpdates.append(candidate)
+        learningLock.unlock()
+        
+        learningQueue.async { [weak self] in
+            self?.processLearningUpdates()
+        }
+    }
+    
+    /// 非同期で学習データの更新をコミット
+    private func commitUpdateLearningDataAsync() {
+        learningQueue.async { [weak self] in
+            Task { @MainActor in
+                self?.kanaKanjiConverter.commitUpdateLearningData()
+            }
+        }
+    }
+    
+    /// 蓄積された学習データを処理
+    private func processLearningUpdates() {
+        learningLock.lock()
+        let candidates = pendingLearningUpdates
+        pendingLearningUpdates.removeAll()
+        learningLock.unlock()
+        
+        guard !candidates.isEmpty else { return }
+        
+        Task { @MainActor in
+            for candidate in candidates {
+                self.kanaKanjiConverter.updateLearningData(candidate)
+            }
+        }
+    }
+    
+    /// アプリ非アクティブ時の安全な学習データ保存
+    private func flushLearningDataSafely() {
+        learningQueue.async { [weak self] in
+            // 保留中の更新を処理
+            self?.processLearningUpdates()
+            
+            // 短時間待機してからコミット
+            Thread.sleep(forTimeInterval: 0.1)
+            
+            Task { @MainActor in
+                self?.kanaKanjiConverter.commitUpdateLearningData()
+            }
+        }
+    }
 
     private func getZenzaiPersonalizationMode() -> ConvertRequestOptions.ZenzaiMode.PersonalizationMode? {
         let alpha = self.zenzaiPersonalizationLevel.alpha
@@ -163,7 +219,7 @@ final class SegmentsManager {
     @MainActor
     func deactivate() {
         self.kanaKanjiConverter.stopComposition()
-        self.kanaKanjiConverter.commitUpdateLearningData()
+        self.flushLearningDataSafely()
         self.rawCandidates = nil
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
@@ -190,7 +246,7 @@ final class SegmentsManager {
         self.rawCandidates = nil
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
-        self.kanaKanjiConverter.commitUpdateLearningData()
+        self.commitUpdateLearningDataAsync()
         self.shouldShowCandidateWindow = false
         self.selectionIndex = nil
     }
@@ -367,7 +423,7 @@ final class SegmentsManager {
     /// - note: 画面更新との整合性を保つため、この関数の実行前に左文脈を取得し、これを引数として与える
     @MainActor func prefixCandidateCommited(_ candidate: Candidate, leftSideContext: String) {
         self.kanaKanjiConverter.setCompletedData(candidate)
-        self.kanaKanjiConverter.updateLearningData(candidate)
+        self.updateLearningDataAsync(candidate)
         self.composingText.prefixComplete(composingCount: candidate.composingCount)
 
         if !self.composingText.isEmpty {
