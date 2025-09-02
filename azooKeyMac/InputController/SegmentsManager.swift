@@ -75,8 +75,12 @@ final class SegmentsManager {
         guard !candidates.isEmpty else { return }
         
         Task { @MainActor in
-            for candidate in candidates {
+            for (index, candidate) in candidates.enumerated() {
                 self.kanaKanjiConverter.updateLearningData(candidate)
+                // 5個ごとにUIスレッドに制御を譲る
+                if index % 5 == 4 {
+                    await Task.yield()
+                }
             }
         }
     }
