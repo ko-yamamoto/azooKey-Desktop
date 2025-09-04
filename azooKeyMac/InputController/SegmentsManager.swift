@@ -59,8 +59,9 @@ final class SegmentsManager {
     /// 非同期で学習データの更新をコミット
     private func commitUpdateLearningDataAsync() {
         learningQueue.async { [weak self] in
-            Task { @MainActor in
-                self?.kanaKanjiConverter.commitUpdateLearningData()
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.kanaKanjiConverter.commitUpdateLearningData()
             }
         }
     }
@@ -74,7 +75,8 @@ final class SegmentsManager {
         
         guard !candidates.isEmpty else { return }
         
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
             for (index, candidate) in candidates.enumerated() {
                 self.kanaKanjiConverter.updateLearningData(candidate)
                 // 5個ごとにUIスレッドに制御を譲る
@@ -95,17 +97,20 @@ final class SegmentsManager {
             
             // バックグラウンドタスクでコミット
             Task.detached(priority: .background) { [weak self] in
+                guard let self = self else { return }
+                
                 try? await Task.sleep(for: .milliseconds(100))
                 
                 // メインスレッドでコミット実行
-                await self?.commitLearningDataInBackground()
+                await self.commitLearningDataInBackground()
             }
         }
     }
     
     /// バックグラウンドでの学習データコミット
     private func commitLearningDataInBackground() async {
-        await MainActor.run {
+        await MainActor.run { [weak self] in
+            guard let self = self else { return }
             self.kanaKanjiConverter.commitUpdateLearningData()
         }
     }
