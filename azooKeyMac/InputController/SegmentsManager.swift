@@ -88,15 +88,25 @@ final class SegmentsManager {
     /// アプリ非アクティブ時の安全な学習データ保存
     private func flushLearningDataSafely() {
         learningQueue.async { [weak self] in
+            guard let self = self else { return }
+            
             // 保留中の更新を処理
-            self?.processLearningUpdates()
+            self.processLearningUpdates()
             
-            // 短時間待機してからコミット
-            Thread.sleep(forTimeInterval: 0.1)
-            
-            Task { @MainActor in
-                self?.kanaKanjiConverter.commitUpdateLearningData()
+            // バックグラウンドタスクでコミット
+            Task.detached(priority: .background) { [weak self] in
+                try? await Task.sleep(for: .milliseconds(100))
+                
+                // メインスレッドでコミット実行
+                await self?.commitLearningDataInBackground()
             }
+        }
+    }
+    
+    /// バックグラウンドでの学習データコミット
+    private func commitLearningDataInBackground() async {
+        await MainActor.run {
+            self.kanaKanjiConverter.commitUpdateLearningData()
         }
     }
 
