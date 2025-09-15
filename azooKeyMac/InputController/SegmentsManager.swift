@@ -39,80 +39,60 @@ final class SegmentsManager {
     private var suggestSelectionIndex: Int?
 
     private lazy var zenzaiPersonalizationMode: ConvertRequestOptions.ZenzaiMode.PersonalizationMode? = self.getZenzaiPersonalizationMode()
-    
+
     // MARK: - Learning Data Async Processing
     private let learningQueue = DispatchQueue(label: "com.azookey.learning", qos: .utility)
     private let learningLock = NSLock()
     private var pendingLearningUpdates: [Candidate] = []
-    
+
     /// 非同期で学習データを更新
     private func updateLearningDataAsync(_ candidate: Candidate) {
-        learningLock.lock()
-        pendingLearningUpdates.append(candidate)
-        learningLock.unlock()
-        
-        learningQueue.async { [weak self] in
-            self?.processLearningUpdates()
+        Task.detached(priority: .utility) { [weak self] in
+            await self?.kanaKanjiConverter.updateLearningDataAsync(candidate)
         }
     }
-    
+
     /// 非同期で学習データの更新をコミット
     private func commitUpdateLearningDataAsync() {
-        learningQueue.async { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                self.kanaKanjiConverter.commitUpdateLearningData()
-            }
+        Task.detached(priority: .utility) { [weak self] in
+            await self?.kanaKanjiConverter.commitLearningDataAsync()
         }
     }
-    
-    /// 蓄積された学習データを処理
+
+    /// 蓄積された学習データを処理（非推奨：新しい非同期APIを使用してください）
+    @available(*, deprecated, message: "Use updateLearningDataAsync(_:) directly instead")
     private func processLearningUpdates() {
         learningLock.lock()
         let candidates = pendingLearningUpdates
         pendingLearningUpdates.removeAll()
         learningLock.unlock()
-        
+
         guard !candidates.isEmpty else { return }
-        
-        Task { @MainActor [weak self] in
+
+        Task.detached(priority: .utility) { [weak self] in
             guard let self = self else { return }
-            for (index, candidate) in candidates.enumerated() {
-                self.kanaKanjiConverter.updateLearningData(candidate)
-                // 5個ごとにUIスレッドに制御を譲る
-                if index % 5 == 4 {
-                    await Task.yield()
-                }
+            for candidate in candidates {
+                await self.kanaKanjiConverter.updateLearningDataAsync(candidate)
             }
         }
     }
-    
+
     /// アプリ非アクティブ時の安全な学習データ保存
     private func flushLearningDataSafely() {
-        learningQueue.async { [weak self] in
+        Task.detached(priority: .background) { [weak self] in
             guard let self = self else { return }
-            
-            // 保留中の更新を処理
-            self.processLearningUpdates()
-            
-            // バックグラウンドタスクでコミット
-            Task.detached(priority: .background) { [weak self] in
-                guard let self = self else { return }
-                
-                try? await Task.sleep(for: .milliseconds(100))
-                
-                // メインスレッドでコミット実行
-                await self.commitLearningDataInBackground()
-            }
+
+            // わずかな遅延でUI処理を優先
+            try? await Task.sleep(for: .milliseconds(50))
+
+            // 学習データを直接コミット
+            await self.kanaKanjiConverter.commitLearningDataAsync()
         }
     }
-    
+
     /// バックグラウンドでの学習データコミット
     private func commitLearningDataInBackground() async {
-        await MainActor.run { [weak self] in
-            guard let self = self else { return }
-            self.kanaKanjiConverter.commitUpdateLearningData()
-        }
+        await kanaKanjiConverter.commitLearningDataAsync()
     }
 
     private func getZenzaiPersonalizationMode() -> ConvertRequestOptions.ZenzaiMode.PersonalizationMode? {
