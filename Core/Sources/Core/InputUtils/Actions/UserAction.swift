@@ -6,6 +6,7 @@ public enum UserAction {
     case space(prefersFullWidthWhenInput: Bool)
     case escape
     case tab
+    case shiftTab
     case unknown
     case 英数
     case かな
