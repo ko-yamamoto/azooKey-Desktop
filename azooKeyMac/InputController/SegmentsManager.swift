@@ -45,6 +45,17 @@ final class SegmentsManager {
     private let learningLock = NSLock()
     private var pendingLearningUpdates: [Candidate] = []
 
+    // MARK: - Prediction Settings
+    /// 予測変換機能が有効かどうか
+    private var predictionEnabled: Bool {
+        Config.PredictionEnabled().value
+    }
+
+    /// 予測変換を開始する最小文字数
+    private var predictionMinimumCharacters: Int {
+        Config.PredictionMinimumCharacters().value
+    }
+
     /// 非同期で学習データを更新
     private func updateLearningDataAsync(_ candidate: Candidate) {
         Task.detached(priority: .utility) { [weak self] in
@@ -182,7 +193,7 @@ final class SegmentsManager {
 
     private func options(leftSideContext: String? = nil, requestRichCandidates: Bool = false) -> ConvertRequestOptions {
         .init(
-            requireJapanesePrediction: false,
+            requireJapanesePrediction: shouldEnablePrediction(),
             requireEnglishPrediction: false,
             keyboardLanguage: .ja_JP,
             englishCandidateInRoman2KanaInput: false,
@@ -195,6 +206,29 @@ final class SegmentsManager {
             zenzaiMode: self.zenzaiMode(leftSideContext: leftSideContext, requestRichCandidates: requestRichCandidates),
             metadata: self.metadata
         )
+    }
+
+    /// 予測機能を有効化すべきかどうかを判定
+    /// - Returns: true の場合、予測候補を取得する
+    /// - Note: この判定は高速に実行される（< 1ms）
+    private func shouldEnablePrediction() -> Bool {
+        // 1. ユーザー設定で予測機能が無効の場合
+        guard predictionEnabled else { return false }
+
+        // 2. 入力が空の場合
+        guard !composingText.isEmpty else { return false }
+
+        // 3. セグメント編集中の場合
+        if didExperienceSegmentEdition { return false }
+
+        // 4. カーソル位置までのテキストを取得
+        let prefixText = composingText.prefixToCursorPosition()
+        let characterCount = prefixText.convertTarget.count
+
+        // 5. 最小文字数を満たしているか
+        guard characterCount >= predictionMinimumCharacters else { return false }
+
+        return true
     }
 
     var azooKeyMemoryDir: URL {

@@ -60,4 +60,9 @@ extension Config {
         static let `default` = true
         static var key: String = "dev.ensan.inputmethod.azooKeyMac.preference.includeContextInAITransform"
     }
+    /// 予測変換機能を有効化する設定
+    struct PredictionEnabled: BoolConfigItem {
+        static let `default` = true
+        static var key: String = "dev.ensan.inputmethod.azooKeyMac.preference.enablePrediction"
+    }
 }
