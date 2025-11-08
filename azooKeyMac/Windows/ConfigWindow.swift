@@ -5,9 +5,8 @@ struct ConfigWindow: View {
     @ConfigState private var liveConversion = Config.LiveConversion()
     @ConfigState private var inputStyle = Config.InputStyle()
     @ConfigState private var typeBackSlash = Config.TypeBackSlash()
-    @ConfigState private var typeCommaAndPeriod = Config.TypeCommaAndPeriod()
+    @ConfigState private var punctuationStyle = Config.PunctuationStyle()
     @ConfigState private var typeHalfSpace = Config.TypeHalfSpace()
-    @ConfigState private var zenzai = Config.ZenzaiIntegration()
     @ConfigState private var zenzaiProfile = Config.ZenzaiProfile()
     @ConfigState private var zenzaiPersonalizationLevel = Config.ZenzaiPersonalizationLevel()
     @ConfigState private var enableOpenAiApiKey = Config.EnableOpenAiApiKey()
@@ -20,7 +19,6 @@ struct ConfigWindow: View {
     @ConfigState private var userDictionary = Config.UserDictionary()
     @ConfigState private var systemUserDictionary = Config.SystemUserDictionary()
 
-    @State private var zenzaiHelpPopover = false
     @State private var zenzaiProfileHelpPopover = false
     @State private var zenzaiInferenceLimitHelpPopover = false
     @State private var openAiApiKeyPopover = false
@@ -121,20 +119,9 @@ struct ConfigWindow: View {
                         Text("学習を停止").tag(Config.Learning.Value.onlyOutput)
                         Text("学習を無視").tag(Config.Learning.Value.nothing)
                     }
-                    Picker("パーソナライズ", selection: $zenzaiPersonalizationLevel) {
-                        Text("オフ").tag(Config.ZenzaiPersonalizationLevel.Value.off)
-                        Text("弱く").tag(Config.ZenzaiPersonalizationLevel.Value.soft)
-                        Text("普通").tag(Config.ZenzaiPersonalizationLevel.Value.normal)
-                        Text("強く").tag(Config.ZenzaiPersonalizationLevel.Value.hard)
-                    }
                     Divider()
                     HStack {
-                        Toggle("Zenzaiを有効化", isOn: $zenzai)
-                        helpButton(helpContent: "Zenzaiはニューラル言語モデルを利用した最新のかな漢字変換システムです。\nMacのGPUを利用して高精度な変換を行います。\n変換エンジンはローカルで動作するため、外部との通信は不要です。", isPresented: $zenzaiHelpPopover)
-                    }
-                    HStack {
                         TextField("変換プロフィール", text: $zenzaiProfile, prompt: Text("例：田中太郎/高校生"))
-                            .disabled(!zenzai.value)
                         helpButton(
                             helpContent: """
                         Zenzaiはあなたのプロフィールを考慮した変換を行うことができます。
@@ -158,10 +145,8 @@ struct ConfigWindow: View {
                                 }
                             )
                         )
-                        .disabled(!zenzai.value)
                         Stepper("", value: $inferenceLimit, in: 1 ... 50)
                             .labelsHidden()
-                            .disabled(!zenzai.value)
                         helpButton(helpContent: "推論上限を小さくすると、入力中のもたつきが改善されることがあります。", isPresented: $zenzaiInferenceLimitHelpPopover)
                     }
                     Divider()
@@ -180,8 +165,13 @@ struct ConfigWindow: View {
                     Divider()
                     Toggle("ライブ変換を有効化", isOn: $liveConversion)
                     Toggle("円記号の代わりにバックスラッシュを入力", isOn: $typeBackSlash)
-                    Toggle("「、」「。」の代わりに「，」「．」を入力", isOn: $typeCommaAndPeriod)
                     Toggle("スペースは常に半角を入力", isOn: $typeHalfSpace)
+                    Picker("句読点の種類", selection: $punctuationStyle) {
+                        Text("、と。").tag(Config.PunctuationStyle.Value.`kutenAndToten`)
+                        Text("、と．").tag(Config.PunctuationStyle.Value.periodAndToten)
+                        Text("，と。").tag(Config.PunctuationStyle.Value.kutenAndComma)
+                        Text("，と．").tag(Config.PunctuationStyle.Value.periodAndComma)
+                    }
                     Divider()
                     LabeledContent {
                         HStack {
@@ -232,6 +222,12 @@ struct ConfigWindow: View {
                     }
                     Divider()
                     Toggle("（開発者用）デバッグウィンドウを有効化", isOn: $debugWindow)
+                    Picker("（開発者用）パーソナライズ", selection: $zenzaiPersonalizationLevel) {
+                        Text("オフ").tag(Config.ZenzaiPersonalizationLevel.Value.off)
+                        Text("弱く").tag(Config.ZenzaiPersonalizationLevel.Value.soft)
+                        Text("普通").tag(Config.ZenzaiPersonalizationLevel.Value.normal)
+                        Text("強く").tag(Config.ZenzaiPersonalizationLevel.Value.hard)
+                    }
                     Toggle("OpenAI APIキーの利用", isOn: $enableOpenAiApiKey)
                     HStack {
                         SecureField("OpenAI API", text: $openAiApiKey, prompt: Text("例:sk-xxxxxxxxxxx"))
