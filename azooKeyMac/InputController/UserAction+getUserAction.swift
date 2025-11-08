@@ -137,7 +137,7 @@ extension UserAction {
             }
         case 0x29: // Control + ;
             if event.modifierFlags.contains(.control) {
-                return .function(.eight)
+                return .function(.ten)
             } else if let text = event.characters, isPrintable(text) {
                 return .input(keyMap(text))
             } else {
