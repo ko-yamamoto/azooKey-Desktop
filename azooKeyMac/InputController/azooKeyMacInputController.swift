@@ -266,17 +266,17 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
             self.submitSelectedCandidate()
             self.segmentsManager.requestResettingSelection()
         case .submitHiraganaCandidate:
-            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate {
+            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate({
                 $0.toHiragana()
-            })
+            }, inputState: self.inputState))
         case .submitKatakanaCandidate:
-            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate {
+            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate({
                 $0.toKatakana()
-            })
+            }, inputState: self.inputState))
         case .submitHankakuKatakanaCandidate:
-            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate {
+            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate({
                 $0.toKatakana().applyingTransform(.fullwidthToHalfwidth, reverse: false)!
-            })
+            }, inputState: self.inputState))
         case .submitFullWidthRomanCandidate:
             self.submitCandidate(self.segmentsManager.getModifiedRomanCandidate {
                 $0.applyingTransform(.fullwidthToHalfwidth, reverse: true)!

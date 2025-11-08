@@ -23,6 +23,8 @@ final class SegmentsManager {
         Config.ZenzaiPersonalizationLevel().value
     }
     private var rawCandidates: ConversionResult?
+    /// 予測候補専用（候補リストにのみ表示、ライブ変換には反映しない）
+    private var predictionCandidates: ConversionResult?
 
     private var selectionIndex: Int?
     private var didExperienceSegmentEdition = false
@@ -186,7 +188,7 @@ final class SegmentsManager {
 
     private func options(leftSideContext: String? = nil, requestRichCandidates: Bool = false) -> ConvertRequestOptions {
         .init(
-            requireJapanesePrediction: shouldEnablePrediction(),
+            requireJapanesePrediction: false,  // ライブ変換には予測を含めない
             requireEnglishPrediction: false,
             keyboardLanguage: .ja_JP,
             englishCandidateInRoman2KanaInput: false,
@@ -247,6 +249,7 @@ final class SegmentsManager {
         self.kanaKanjiConverter.stopComposition()
         self.flushLearningDataSafely()
         self.rawCandidates = nil
+        self.predictionCandidates = nil
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
         self.composingText.stopComposition()
@@ -260,6 +263,7 @@ final class SegmentsManager {
         self.composingText.stopComposition()
         self.kanaKanjiConverter.stopComposition()
         self.rawCandidates = nil
+        self.predictionCandidates = nil
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
         self.shouldShowCandidateWindow = false
@@ -270,6 +274,7 @@ final class SegmentsManager {
     /// 日本語入力自体をやめる
     func stopJapaneseInput() {
         self.rawCandidates = nil
+        self.predictionCandidates = nil
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
         self.commitUpdateLearningDataAsync()
@@ -295,8 +300,8 @@ final class SegmentsManager {
     func insertAtCursorPosition(_ string: String, inputStyle: InputStyle) {
         self.composingText.insertAtCursorPosition(string, inputStyle: inputStyle)
         self.lastOperation = .insert
-        // ライブ変換がオフの場合は変換候補ウィンドウを出したい
-        self.shouldShowCandidateWindow = !self.liveConversionEnabled
+        // ライブ変換がオフの場合、または予測機能が有効な場合は候補ウィンドウを表示
+        self.shouldShowCandidateWindow = !self.liveConversionEnabled || self.shouldEnablePrediction()
         self.updateRawCandidate()
     }
 
@@ -304,17 +309,17 @@ final class SegmentsManager {
     func insertAtCursorPosition(pieces: [InputPiece], inputStyle: InputStyle) {
         self.composingText.insertAtCursorPosition(pieces.map { .init(piece: $0, inputStyle: inputStyle) })
         self.lastOperation = .insert
-        // ライブ変換がオフの場合は変換候補ウィンドウを出したい
-        self.shouldShowCandidateWindow = !self.liveConversionEnabled
+        // ライブ変換がオフの場合、または予測機能が有効な場合は候補ウィンドウを表示
+        self.shouldShowCandidateWindow = !self.liveConversionEnabled || self.shouldEnablePrediction()
         self.updateRawCandidate()
     }
 
     @MainActor
     func editSegment(count: Int) {
         // 現在選ばれているprefix candidateが存在する場合、まずそれに合わせてカーソルを移動する
-        if let selectionIndex, let candidates, candidates.indices.contains(selectionIndex) {
+        if let selectionIndex, let candidatesWithPrediction, candidatesWithPrediction.indices.contains(selectionIndex) {
             var afterComposingText = self.composingText
-            afterComposingText.prefixComplete(composingCount: candidates[selectionIndex].composingCount)
+            afterComposingText.prefixComplete(composingCount: candidatesWithPrediction[selectionIndex].composingCount)
             let prefixCount = self.composingText.convertTarget.count - afterComposingText.convertTarget.count
             _ = self.composingText.moveCursorFromCursorPosition(count: -self.composingText.convertTargetCursorPosition + prefixCount)
         }
@@ -365,6 +370,7 @@ final class SegmentsManager {
 
     private var candidates: [Candidate]? {
         if let rawCandidates {
+            // 通常の候補を取得（予測候補は含まない）
             if !self.didExperienceSegmentEdition {
                 if rawCandidates.firstClauseResults.contains(where: { self.composingText.isWholeComposingText(composingCount: $0.composingCount) }) {
                     // firstClauseCandidateがmainResultsと同じサイズの場合は、何もしない方が良い
@@ -378,6 +384,43 @@ final class SegmentsManager {
                 }
             } else {
                 return rawCandidates.mainResults
+            }
+        } else {
+            return nil
+        }
+    }
+
+    /// 予測候補を含む候補リスト（候補選択モード用）
+    private var candidatesWithPrediction: [Candidate]? {
+        if let rawCandidates {
+            // 通常の候補を取得
+            let baseCandidates: [Candidate]
+            if !self.didExperienceSegmentEdition {
+                if rawCandidates.firstClauseResults.contains(where: { self.composingText.isWholeComposingText(composingCount: $0.composingCount) }) {
+                    // firstClauseCandidateがmainResultsと同じサイズの場合は、何もしない方が良い
+                    baseCandidates = rawCandidates.mainResults
+                } else {
+                    // 変換範囲がエディットされていない場合
+                    let seenAsFirstClauseResults = rawCandidates.firstClauseResults.mapSet(transform: \.text)
+                    baseCandidates = rawCandidates.firstClauseResults + rawCandidates.mainResults.filter {
+                        !seenAsFirstClauseResults.contains($0.text)
+                    }
+                }
+            } else {
+                baseCandidates = rawCandidates.mainResults
+            }
+
+            // 予測候補を先頭に追加（候補選択モードでのみ表示）
+            if let predictionCandidates, !self.didExperienceSegmentEdition {
+                // 予測候補から通常候補と重複しないものを抽出
+                let seenAsBaseCandidates = baseCandidates.mapSet(transform: \.text)
+                let uniquePredictions = (predictionCandidates.firstClauseResults + predictionCandidates.mainResults).filter {
+                    !seenAsBaseCandidates.contains($0.text)
+                }
+                // 予測候補を先頭に配置
+                return uniquePredictions + baseCandidates
+            } else {
+                return baseCandidates
             }
         } else {
             return nil
@@ -419,6 +462,7 @@ final class SegmentsManager {
         // 不要
         if composingText.isEmpty {
             self.rawCandidates = nil
+            self.predictionCandidates = nil
             self.kanaKanjiConverter.stopComposition()
             return
         }
@@ -455,8 +499,20 @@ final class SegmentsManager {
 
         let prefixComposingText = self.composingText.prefixToCursorPosition()
         let leftSideContext = forcedLeftSideContext ?? self.getCleanLeftSideContext(maxCount: 30)
+
+        // ライブ変換用の候補（予測なし）
         let result = self.kanaKanjiConverter.requestCandidates(prefixComposingText, options: options(leftSideContext: leftSideContext, requestRichCandidates: requestRichCandidates))
         self.rawCandidates = result
+
+        // 候補リスト表示用の予測候補（予測あり）
+        if self.shouldEnablePrediction() {
+            var predictionOptions = options(leftSideContext: leftSideContext, requestRichCandidates: requestRichCandidates)
+            predictionOptions.requireJapanesePrediction = true
+            let predictionResult = self.kanaKanjiConverter.requestCandidates(prefixComposingText, options: predictionOptions)
+            self.predictionCandidates = predictionResult
+        } else {
+            self.predictionCandidates = nil
+        }
     }
 
     @MainActor func update(requestRichCandidates: Bool) {
@@ -519,8 +575,8 @@ final class SegmentsManager {
     }
 
     var selectedCandidate: Candidate? {
-        if let selectionIndex, let candidates, candidates.indices.contains(selectionIndex) {
-            return candidates[selectionIndex]
+        if let selectionIndex, let candidatesWithPrediction, candidatesWithPrediction.indices.contains(selectionIndex) {
+            return candidatesWithPrediction[selectionIndex]
         }
         return nil
     }
@@ -530,8 +586,13 @@ final class SegmentsManager {
         case .none, .previewing, .replaceSuggestion, .attachDiacritic:
             return .hidden
         case .composing:
-            if !self.liveConversionEnabled, let firstCandidate = self.rawCandidates?.mainResults.first {
+            if !self.liveConversionEnabled, let firstCandidate = self.candidates?.first {
+                // ライブ変換無効時は予測候補を含まない最初の候補を表示
                 return .composing([firstCandidate], selectionIndex: 0)
+            } else if self.liveConversionEnabled, let candidatesWithPrediction, !candidatesWithPrediction.isEmpty, self.shouldEnablePrediction() {
+                // ライブ変換有効かつ候補がある場合は候補ウィンドウを表示（未選択状態）
+                // 予測候補を含む候補リストを表示するが、自動選択はしない（入力したままの内容がライブ変換される）
+                return .composing(candidatesWithPrediction, selectionIndex: nil)
             } else {
                 return .hidden
             }
@@ -539,9 +600,10 @@ final class SegmentsManager {
             if self.shouldShowDebugCandidateWindow {
                 self.selectionIndex = max(0, min(self.selectionIndex ?? 0, debugCandidates.count - 1))
                 return .selecting(debugCandidates, selectionIndex: self.selectionIndex)
-            } else if self.shouldShowCandidateWindow, let candidates, !candidates.isEmpty {
-                self.selectionIndex = max(0, min(self.selectionIndex ?? 0, candidates.count - 1))
-                return .selecting(candidates, selectionIndex: self.selectionIndex)
+            } else if self.shouldShowCandidateWindow, let candidatesWithPrediction, !candidatesWithPrediction.isEmpty {
+                // 候補選択モードでは予測候補を含む候補リストを表示
+                self.selectionIndex = max(0, min(self.selectionIndex ?? 0, candidatesWithPrediction.count - 1))
+                return .selecting(candidatesWithPrediction, selectionIndex: self.selectionIndex)
             } else {
                 return .hidden
             }
@@ -573,18 +635,19 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func getModifiedRubyCandidate(_ transform: (String) -> String) -> Candidate {
-        let ruby = if let selectedCandidate {
+    func getModifiedRubyCandidate(_ transform: (String) -> String, inputState: InputState) -> Candidate {
+        // .composing 状態では候補を使わず、常に入力テキストを使う
+        let ruby = if inputState != .composing, let selectedCandidate {
             // `selectedCandidate.data` の全ての `ruby` を連結して返す
             selectedCandidate.data.map { element in
                 element.ruby
             }.joined()
         } else {
-            // 選択範囲なしの場合はconvertTargetを返す
+            // 選択範囲なしの場合、または .composing 状態の場合は convertTarget を返す
             self.composingText.convertTarget
         }
         let candidateText = transform(ruby)
-        let candidate = if let selectedCandidate {
+        let candidate = if inputState != .composing, let selectedCandidate {
             {
                 var candidate = selectedCandidate
                 candidate.text = candidateText
@@ -639,7 +702,8 @@ final class SegmentsManager {
     func commitMarkedText(inputState: InputState) -> String {
         let markedText = self.getCurrentMarkedText(inputState: inputState)
         let text = markedText.reduce(into: "") {$0.append(contentsOf: $1.content)}
-        if let candidate = self.candidates?.first(where: {$0.text == text}) {
+        // .composing 状態では候補を使わず、入力したテキストをそのまま確定
+        if inputState != .composing, let candidate = self.candidatesWithPrediction?.first(where: {$0.text == text}) {
             self.prefixCandidateCommited(candidate, leftSideContext: "")
         }
         self.stopComposition()
@@ -667,32 +731,39 @@ final class SegmentsManager {
                 self.composingText.convertTarget
             } else if self.liveConversionEnabled,
                       self.composingText.convertTarget.count > 1,
-                      let firstCandidate = self.rawCandidates?.mainResults.first {
-                // それ以外の場合、ライブ変換が有効なら
-                firstCandidate.text
+                      let candidates = self.candidates {
+                // ライブ変換が有効な場合はライブ変換を表示
+                // より長い文節を変換する候補を優先（全文変換候補があればそれを使用）
+                if let fullCandidate = candidates.first(where: { self.composingText.isWholeComposingText(composingCount: $0.composingCount) }) {
+                    // 全文を変換する候補が存在する場合はそれを優先
+                    fullCandidate.text
+                } else {
+                    // 全文変換候補がない場合は最初の候補を使用
+                    candidates.first?.text ?? self.composingText.convertTarget
+                }
             } else {
-                // それ以外
+                // ライブ変換無効、または文字数が少ない場合はひらがなを表示
                 self.composingText.convertTarget
             }
             return MarkedText(text: [.init(content: text, focus: .none)], selectionRange: .notFound)
         case .previewing:
-            if let fullCandidate = self.rawCandidates?.mainResults.first,
+            if let fullCandidate = self.candidates?.first,
                self.composingText.isWholeComposingText(composingCount: fullCandidate.composingCount) {
                 return MarkedText(text: [.init(content: fullCandidate.text, focus: .none)], selectionRange: .notFound)
             } else {
                 return MarkedText(text: [.init(content: self.composingText.convertTarget, focus: .none)], selectionRange: .notFound)
             }
         case .selecting:
-            if let candidates, !candidates.isEmpty {
-                self.selectionIndex = min(self.selectionIndex ?? 0, candidates.count - 1)
+            if let candidatesWithPrediction, !candidatesWithPrediction.isEmpty {
+                self.selectionIndex = min(self.selectionIndex ?? 0, candidatesWithPrediction.count - 1)
                 var afterComposingText = self.composingText
-                afterComposingText.prefixComplete(composingCount: candidates[self.selectionIndex!].composingCount)
+                afterComposingText.prefixComplete(composingCount: candidatesWithPrediction[self.selectionIndex!].composingCount)
                 return MarkedText(
                     text: [
-                        .init(content: candidates[self.selectionIndex!].text, focus: .focused),
+                        .init(content: candidatesWithPrediction[self.selectionIndex!].text, focus: .focused),
                         .init(content: afterComposingText.convertTarget, focus: .unfocused)
                     ],
-                    selectionRange: NSRange(location: candidates[self.selectionIndex!].text.count, length: 0)
+                    selectionRange: NSRange(location: candidatesWithPrediction[self.selectionIndex!].text.count, length: 0)
                 )
             } else {
                 return MarkedText(text: [.init(content: self.composingText.convertTarget, focus: .none)], selectionRange: .notFound)

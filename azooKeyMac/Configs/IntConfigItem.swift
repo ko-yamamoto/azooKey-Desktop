@@ -26,7 +26,7 @@ extension Config {
     }
     /// 予測変換を開始する最小文字数
     struct PredictionMinimumCharacters: IntConfigItem {
-        static let `default` = 2
+        static let `default` = 1
         static let key = "dev.ensan.inputmethod.azooKeyMac.preference.predictionMinimumCharacters"
     }
 }

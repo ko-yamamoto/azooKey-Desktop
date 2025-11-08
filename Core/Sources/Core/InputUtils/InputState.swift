@@ -95,7 +95,7 @@ public enum InputState: Sendable, Hashable {
                 } else {
                     return (.fallthrough, .fallthrough)
                 }
-            case .unknown, .navigation, .backspace, .enter, .escape, .function, .editSegment, .tab, .forget, .transformSelectedText:
+            case .unknown, .navigation, .backspace, .enter, .escape, .function, .editSegment, .tab, .shiftTab, .forget, .transformSelectedText:
                 return (.fallthrough, .fallthrough)
             }
         case .attachDiacritic(let diacritic):
@@ -121,7 +121,7 @@ public enum InputState: Sendable, Hashable {
                 return (.insertWithoutMarkedText(diacritic + "\n"), .transition(.none))
             case .tab:
                 return (.insertWithoutMarkedText(diacritic + "\t"), .transition(.none))
-            case .unknown, .space, .英数, .navigation, .editSegment, .suggest, .forget, .transformSelectedText:
+            case .unknown, .space, .英数, .navigation, .editSegment, .suggest, .forget, .transformSelectedText, .shiftTab:
                 return (.insertWithoutMarkedText(diacritic), .transition(.none))
             }
         case .composing:
@@ -138,6 +138,7 @@ public enum InputState: Sendable, Hashable {
                 return (.stopComposition, .transition(.none))
             case .space:
                 if liveConversionEnabled {
+                    // ライブ変換有効時は候補選択モードに入る（1番目から）
                     return (.enterCandidateSelectionMode, .transition(.selecting))
                 } else {
                     return (.enterFirstCandidatePreviewMode, .transition(.previewing))
@@ -155,7 +156,7 @@ public enum InputState: Sendable, Hashable {
                 case .ten:
                     return (.submitHalfWidthRomanCandidate, .transition(.none))
                 }
-            case .かな, .forget, .tab:
+            case .かな, .forget:
                 return (.consume, .fallthrough)
             case .英数:
                 return (.commitMarkedTextAndSelectInputLanguage(.english), .transition(.none))
@@ -178,7 +179,14 @@ public enum InputState: Sendable, Hashable {
                 } else {
                     return (.fallthrough, .fallthrough)
                 }
-            case .unknown, .transformSelectedText, .deadKey:
+            case .tab:
+                if liveConversionEnabled {
+                    // ライブ変換有効時は候補選択モードに入る（1番目から）
+                    return (.enterCandidateSelectionMode, .transition(.selecting))
+                } else {
+                    return (.enterFirstCandidatePreviewMode, .transition(.previewing))
+                }
+            case .unknown, .shiftTab, .transformSelectedText, .deadKey:
                 return (.fallthrough, .fallthrough)
             }
         case .previewing:
@@ -208,7 +216,7 @@ public enum InputState: Sendable, Hashable {
                 case .ten:
                     return (.submitHalfWidthRomanCandidate, .transition(.none))
                 }
-            case .かな, .forget, .tab:
+            case .かな, .forget:
                 return (.consume, .fallthrough)
             case .英数:
                 return (.commitMarkedTextAndSelectInputLanguage(.english), .transition(.none))
@@ -225,6 +233,10 @@ public enum InputState: Sendable, Hashable {
                 }
             case .editSegment(let count):
                 return (.editSegment(count), .transition(.selecting))
+            case .tab:
+                return (.enterCandidateSelectionMode, .transition(.selecting))
+            case .shiftTab:
+                return (.selectPrevCandidate, .fallthrough)
             case .unknown, .suggest, .transformSelectedText, .deadKey:
                 return (.fallthrough, .fallthrough)
             }
@@ -295,10 +307,14 @@ public enum InputState: Sendable, Hashable {
                 return (.editSegment(count), .transition(.selecting))
             case .forget:
                 return (.forgetMemory, .fallthrough)
-            case .かな, .tab:
+            case .かな:
                 return (.consume, .fallthrough)
             case .英数:
                 return (.commitMarkedTextAndSelectInputLanguage(.english), .transition(.none))
+            case .tab:
+                return (.selectNextCandidate, .fallthrough)
+            case .shiftTab:
+                return (.selectPrevCandidate, .fallthrough)
             case .unknown, .suggest, .transformSelectedText, .deadKey:
                 return (.fallthrough, .fallthrough)
             }
@@ -325,7 +341,11 @@ public enum InputState: Sendable, Hashable {
                 return (.hideReplaceSuggestionWindow, .transition(.composing))
             case .英数:
                 return (.submitReplaceSuggestionCandidate, .transition(.none))
-            case .かな, .forget, .tab:
+            case .tab:
+                return (.selectNextReplaceSuggestionCandidate, .fallthrough)
+            case .shiftTab:
+                return (.selectPrevReplaceSuggestionCandidate, .fallthrough)
+            case .かな, .forget:
                 return (.consume, .fallthrough)
             case .unknown, .function, .number, .editSegment, .transformSelectedText, .deadKey:
                 return (.fallthrough, .fallthrough)
