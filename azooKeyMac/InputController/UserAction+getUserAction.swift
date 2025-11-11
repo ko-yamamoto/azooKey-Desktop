@@ -153,7 +153,11 @@ extension UserAction {
         case 0x24, 0x4C: // Enter (0x24) and Numpad Enter (0x4C)
             return .enter
         case 48: // Tab
-            return .tab
+            if event.modifierFlags.contains(.shift) {
+                return .shiftTab
+            } else {
+                return .tab
+            }
         case 49: // Space
             switch (Config.TypeHalfSpace().value, event.modifierFlags.contains(.shift)) {
             case (true, true), (false, false):
