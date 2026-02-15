@@ -126,6 +126,9 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         self.updateTransformSelectedTextMenuItemEnabledState()
         self.segmentsManager.activate()
 
+        // Zenzai モデルをバックグラウンドで事前ロード
+        self.preWarmZenzaiModel()
+
         if let client = sender as? IMKTextInput {
             client.overrideKeyboard(withKeyboardNamed: Config.KeyboardLayout().value.layoutIdentifier)
             var rect: NSRect = .zero
@@ -394,7 +397,17 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
             })
         case .submitHalfWidthRomanCandidate:
             self.submitCandidate(self.segmentsManager.getModifiedRomanCandidate {
-                $0.applyingTransform(.fullwidthToHalfwidth, reverse: false)!
+                let halfWidth = $0.applyingTransform(.fullwidthToHalfwidth, reverse: false)!
+                // 全角記号を英数キー配列に対応した半角文字に変換
+                return halfWidth
+                    .replacingOccurrences(of: "･", with: "/")
+                    .replacingOccurrences(of: "､", with: ",")
+                    .replacingOccurrences(of: "｡", with: ".")
+                    .replacingOccurrences(of: "｢", with: "[")
+                    .replacingOccurrences(of: "｣", with: "]")
+                    .replacingOccurrences(of: ";", with: ";")
+                    .replacingOccurrences(of: ":", with: ":")
+                    .replacingOccurrences(of: "ｰ", with: "-")
             })
         case .enableDebugWindow:
             self.segmentsManager.requestDebugWindowMode(enabled: true)
@@ -417,6 +430,13 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
             self.requestReplaceSuggestion()
         case .acceptPredictionCandidate:
             self.acceptPredictionCandidate()
+        case .selectNextPredictionCandidate:
+            let predictions = self.segmentsManager.requestPredictionCandidates()
+            self.segmentsManager.requestSelectingNextPrediction(count: predictions.count)
+            self.refreshPredictionWindow()
+        case .selectPrevPredictionCandidate:
+            self.segmentsManager.requestSelectingPrevPrediction()
+            self.refreshPredictionWindow()
         // ReplaceSuggestion
         case .requestReplaceSuggestion:
             self.requestReplaceSuggestion()
@@ -573,7 +593,7 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         self.client().attributes(forCharacterIndex: 0, lineHeightRectangle: &rect)
         self.predictionViewController.updateCandidatePresentations(
             candidates.map { .init(candidate: $0) },
-            selectionIndex: nil,
+            selectionIndex: self.segmentsManager.selectedPredictionIndex,
             cursorLocation: rect.origin
         )
 
@@ -619,7 +639,7 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         self.client().attributes(forCharacterIndex: 0, lineHeightRectangle: &rect)
         self.predictionViewController.updateCandidatePresentations(
             candidates.map { .init(candidate: $0) },
-            selectionIndex: nil,
+            selectionIndex: self.segmentsManager.selectedPredictionIndex,
             cursorLocation: rect.origin
         )
         self.predictionWindow.orderFront(nil)
@@ -647,34 +667,50 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         self.lastPredictionUpdateTime = 0
         self.predictionHideWorkItem?.cancel()
         self.predictionHideWorkItem = nil
+        self.predictionViewController.lastDirection = nil
     }
 
     @MainActor
     private func acceptPredictionCandidate() {
         let predictions = self.segmentsManager.requestPredictionCandidates()
-        guard let prediction = predictions.first else {
+
+        // 選択中の候補を取得、なければ先頭候補（インデックス0）
+        let selectedIndex = self.segmentsManager.selectedPredictionIndex ?? 0
+        guard selectedIndex < predictions.count else {
             return
         }
+        let prediction = predictions[selectedIndex]
 
         let currentTarget = self.segmentsManager.convertTarget
-        var matchTarget = currentTarget
-        if let last = matchTarget.last,
-           last.unicodeScalars.allSatisfy({ $0.isASCII && CharacterSet.letters.contains($0) }) {
-            matchTarget.removeLast()
-            self.segmentsManager.deleteBackwardFromCursorPosition(count: 1)
-        }
 
-        guard !matchTarget.isEmpty else {
+        // 現在のcomposingTextを全削除してfullTextを挿入（全体置換）
+        // 英字読み・ひらがな読みともに同じ処理を行う
+        // 理由: 読みと表示が異なる場合（例: 読み「・・」→ 表示「……」）、
+        //       appendTextを追加するだけでは正しい結果にならない
+        let deleteCount = currentTarget.count
+        if deleteCount > 0 {
+            self.segmentsManager.deleteBackwardFromCursorPosition(count: deleteCount)
+        }
+        self.segmentsManager.insertAtCursorPosition(prediction.fullText, inputStyle: .direct)
+
+        // 候補受け入れ後、選択状態をリセット
+        self.segmentsManager.resetPredictionSelection()
+    }
+
+    /// Zenzaiモデルをバックグラウンドで事前にロードする
+    private func preWarmZenzaiModel() {
+        let modelURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/ggml-model-Q5_K_M.gguf", isDirectory: false)
+        guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else {
             return
         }
-
-        let appendText = prediction.appendText
-
-        guard !appendText.isEmpty else {
-            return
+        // KanaKanjiConverterはSendableではないため、UnsafeSendableラッパーを使用
+        struct UnsafeSendableConverter: @unchecked Sendable {
+            let converter: KanaKanjiConverter
         }
-
-        self.segmentsManager.insertAtCursorPosition(appendText, inputStyle: .direct)
+        let wrapper = UnsafeSendableConverter(converter: appDelegate.kanaKanjiConverter)
+        Task.detached(priority: .userInitiated) {
+            wrapper.converter.warmUp(zenzaiModelURL: modelURL)
+        }
     }
 
     var retryCount = 0
@@ -766,6 +802,12 @@ extension azooKeyMacInputController: SegmentManagerDelegate {
         let leftSideContext = self.client().string(from: leftRange, actualRange: &actual)
         self.segmentsManager.appendDebugMessage("\(#function): leftSideContext=\(leftSideContext ?? "nil")")
         return leftSideContext
+    }
+
+    @MainActor func conversionCompleted() {
+        self.refreshMarkedText()
+        self.refreshCandidateWindow()
+        self.refreshPredictionWindow()
     }
 }
 

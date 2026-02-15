@@ -147,12 +147,12 @@ public enum UserAction {
             case ("k", [.control]): // Control + k
                 return .function(.seven)
             case (";", [.control]): // Control + ;
-                return .function(.eight)
+                return .function(.ten)
             case (":", [.control]): // Control + :
                 return .function(.ten)
             case ("'", [.control]): // Control + '
                 return .function(.ten)
-            case ("s", [.control]): // Control + s
+            case ("s", [.control, .option]): // Control + Option + s
                 return .suggest
             case ("u", [.control, .shift]): // Shift + Control + u
                 return .startUnicodeInput

@@ -88,6 +88,7 @@ class CandidatesViewController: BaseCandidateViewController {
     func hide() {
         self.currentSelectedRow = -1
         self.showedRows = 0...8
+        self.lastDirection = nil
     }
 
     override var numberOfVisibleRows: Int {
@@ -110,7 +111,7 @@ class PredictionCandidatesViewController: BaseCandidateViewController {
     private let prefixFontSize: CGFloat = 12
 
     override var numberOfVisibleRows: Int {
-        min(3, self.tableView.numberOfRows)
+        min(5, self.tableView.numberOfRows)
     }
 
     override internal func configureCellView(_ cell: CandidateTableCellView, forRow row: Int) {

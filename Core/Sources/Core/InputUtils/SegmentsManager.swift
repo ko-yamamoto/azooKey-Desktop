@@ -35,21 +35,31 @@ public final class SegmentsManager {
     private var liveConversionEnabled: Bool {
         Config.LiveConversion().value
     }
-    private var userDictionary: Config.UserDictionary.Value {
-        Config.UserDictionary().value
-    }
-    private var systemUserDictionary: Config.SystemUserDictionary.Value {
-        Config.SystemUserDictionary().value
-    }
+    private var cachedUserDictionary: Config.UserDictionary.Value = .init(items: [])
+    private var cachedSystemUserDictionary: Config.SystemUserDictionary.Value = .init(items: [])
     private var zenzaiPersonalizationLevel: Config.ZenzaiPersonalizationLevel.Value {
         Config.ZenzaiPersonalizationLevel().value
     }
+    /// rawCandidates と生成時の convertTarget はペアで管理する。
+    /// 更新時は必ず clearRawCandidates() / setRawCandidates(_:) を使うこと。
     private var rawCandidates: ConversionResult?
+    private var rawCandidatesConvertTarget: String?
+
+    private func clearRawCandidates() {
+        self.rawCandidates = nil
+        self.rawCandidatesConvertTarget = nil
+    }
+
+    private func setRawCandidates(_ result: ConversionResult) {
+        self.rawCandidates = result
+        self.rawCandidatesConvertTarget = self.composingText.convertTarget
+    }
 
     private var selectionIndex: Int?
     private var didExperienceSegmentEdition = false
     private var lastOperation: Operation = .other
     private var shouldShowCandidateWindow = false
+    private var conversionTask: Task<Void, Never>?
 
     private var isShowingAdditionalCandidates = false
     private var additionalCandidates: [CandidatePresentation] = []
@@ -62,9 +72,15 @@ public final class SegmentsManager {
     private var replaceSuggestions: [Candidate] = []
     private var suggestSelectionIndex: Int?
 
+    private var predictionSelectionIndex: Int?
+
     public struct PredictionCandidate: Sendable {
         public var displayText: String
         public var appendText: String
+        /// 英字読みの候補かどうか（全体置換が必要）
+        public var isEnglishReading: Bool
+        /// 候補の完全なテキスト（英字読みの場合に使用）
+        public var fullText: String
     }
 
     private func candidateReading(_ candidate: Candidate) -> String {
@@ -82,6 +98,67 @@ public final class SegmentsManager {
     }
 
     private lazy var zenzaiPersonalizationMode: ConvertRequestOptions.ZenzaiMode.PersonalizationMode? = self.getZenzaiPersonalizationMode()
+
+    private var cachedDynamicShortcuts: [DicdataElement] = []
+
+    private static func buildDynamicShortcuts() -> [DicdataElement] {
+        [
+            ("M/d", -18, DateTemplateLiteral.CalendarType.western),
+            ("yyyy/MM/dd", -18.1, .western),
+            ("yyyy-MM-dd", -18.2, .western),
+            ("M月d日（E）", -18.3, .western),
+            ("yyyy年M月d日", -18.4, .western),
+            ("Gyyyy年M月d日", -18.5, .japanese),
+            ("E曜日", -18.6, .western)
+        ].flatMap { (format, value: PValue, type) in
+            [
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-2", deltaUnit: 60 * 60 * 24).export(), ruby: "オトトイ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-1", deltaUnit: 60 * 60 * 24).export(), ruby: "キノウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "キョウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "1", deltaUnit: 60 * 60 * 24).export(), ruby: "アシタ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "2", deltaUnit: 60 * 60 * 24).export(), ruby: "アサッテ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value)
+            ]
+        } + [
+            // 月
+            .init(word: DateTemplateLiteral(format: "MM月", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コンゲツ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
+            // 年
+            .init(word: DateTemplateLiteral(format: "yyyy年", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
+            .init(word: DateTemplateLiteral(format: "Gyyyy年", type: .japanese, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18.1)
+        ]
+    }
+
+    // MARK: - Learning Data Async Processing
+
+    /// Sendable 境界を超えるためのラッパー
+    private struct UnsafeSendableConverter: @unchecked Sendable {
+        let converter: KanaKanjiConverter
+    }
+
+    /// 非同期で学習データを更新
+    private func updateLearningDataAsync(_ candidate: Candidate) {
+        let wrapper = UnsafeSendableConverter(converter: self.kanaKanjiConverter)
+        Task.detached(priority: .utility) {
+            await wrapper.converter.updateLearningDataAsync(candidate)
+        }
+    }
+
+    /// 非同期で学習データの更新をコミット
+    private func commitUpdateLearningDataAsync() {
+        let wrapper = UnsafeSendableConverter(converter: self.kanaKanjiConverter)
+        Task.detached(priority: .utility) {
+            await wrapper.converter.commitLearningDataAsync()
+        }
+    }
+
+    /// アプリ非アクティブ時の安全な学習データ保存
+    private func flushLearningDataSafely() {
+        let wrapper = UnsafeSendableConverter(converter: self.kanaKanjiConverter)
+        Task.detached(priority: .background) {
+            // わずかな遅延でUI処理を優先
+            try? await Task.sleep(for: .milliseconds(50))
+            await wrapper.converter.commitLearningDataAsync()
+        }
+    }
 
     private func getZenzaiPersonalizationMode() -> ConvertRequestOptions.ZenzaiMode.PersonalizationMode? {
         let alpha = self.zenzaiPersonalizationLevel.alpha
@@ -192,44 +269,57 @@ public final class SegmentsManager {
     public func activate() {
         self.shouldShowCandidateWindow = false
         self.zenzaiPersonalizationMode = self.getZenzaiPersonalizationMode()
+        self.cachedUserDictionary = Config.UserDictionary().value
+        self.cachedSystemUserDictionary = Config.SystemUserDictionary().value
+        self.cachedDynamicShortcuts = Self.buildDynamicShortcuts()
     }
 
     @MainActor
     public func deactivate() {
-        self.kanaKanjiConverter.stopComposition()
-        self.kanaKanjiConverter.commitUpdateLearningData()
-        self.rawCandidates = nil
+        self.conversionTask?.cancel()
+        // composingText が空でない場合のみ stopComposition を呼ぶ。
+        // commitMarkedText() → stopComposition() で既にクリア済みの場合、
+        // 重い kanaKanjiConverter.stopComposition()（Zenzai コンテキスト再作成）を回避する。
+        if !self.composingText.isEmpty {
+            self.kanaKanjiConverter.stopComposition()
+        }
+        self.flushLearningDataSafely()
+        self.clearRawCandidates()
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
         self.composingText.stopComposition()
         self.shouldShowCandidateWindow = false
         self.selectionIndex = nil
         self.resetAdditionalCandidates()
+        self.predictionSelectionIndex = nil
     }
 
     @MainActor
     /// この入力を打ち切る
     public func stopComposition() {
+        self.conversionTask?.cancel()
         self.composingText.stopComposition()
         self.kanaKanjiConverter.stopComposition()
-        self.rawCandidates = nil
+        self.clearRawCandidates()
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
         self.shouldShowCandidateWindow = false
         self.selectionIndex = nil
         self.resetAdditionalCandidates()
+        self.predictionSelectionIndex = nil
     }
 
     @MainActor
     /// 日本語入力自体をやめる
     public func stopJapaneseInput() {
-        self.rawCandidates = nil
+        self.clearRawCandidates()
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
-        self.kanaKanjiConverter.commitUpdateLearningData()
+        self.commitUpdateLearningDataAsync()
         self.shouldShowCandidateWindow = false
         self.selectionIndex = nil
         self.resetAdditionalCandidates()
+        self.predictionSelectionIndex = nil
     }
 
     /// 変換キーを押したタイミングで入力の区切りを示す
@@ -252,7 +342,7 @@ public final class SegmentsManager {
         self.lastOperation = .insert
         // ライブ変換がオフの場合は変換候補ウィンドウを出したい
         self.shouldShowCandidateWindow = !self.liveConversionEnabled
-        self.updateRawCandidate()
+        self.deferredUpdateRawCandidate()
     }
 
     @MainActor
@@ -261,7 +351,7 @@ public final class SegmentsManager {
         self.lastOperation = .insert
         // ライブ変換がオフの場合は変換候補ウィンドウを出したい
         self.shouldShowCandidateWindow = !self.liveConversionEnabled
-        self.updateRawCandidate()
+        self.deferredUpdateRawCandidate()
     }
 
     @MainActor
@@ -307,7 +397,7 @@ public final class SegmentsManager {
         self.lastOperation = .delete
         // ライブ変換がオフの場合は変換候補ウィンドウを出したい
         self.shouldShowCandidateWindow = !self.liveConversionEnabled
-        self.updateRawCandidate()
+        self.deferredUpdateRawCandidate()
     }
 
     @MainActor
@@ -386,6 +476,21 @@ public final class SegmentsManager {
         }
     }
 
+    /// 変換処理を遅延実行する。高速タイピング時はキャンセル＆再スケジュールでデバウンスする。
+    @MainActor private func deferredUpdateRawCandidate(requestRichCandidates: Bool = false, forcedLeftSideContext: String? = nil) {
+        // 前回の変換タスクをキャンセル
+        self.conversionTask?.cancel()
+        // 前回の変換結果はクリアせず保持し、新結果が来るまで表示を維持する（ちらつき防止）
+
+        self.conversionTask = Task { @MainActor in
+            // RunLoopに制御を戻してUI更新を先行させる
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            self.updateRawCandidate(requestRichCandidates: requestRichCandidates, forcedLeftSideContext: forcedLeftSideContext)
+            self.delegate?.conversionCompleted()
+        }
+    }
+
     /// Updates the `self.rawCandidates` based on the current input context.
     ///
     /// This function is responsible for handling candidate conversion,
@@ -402,46 +507,23 @@ public final class SegmentsManager {
         self.resetAdditionalCandidates()
         // 不要
         if composingText.isEmpty {
-            self.rawCandidates = nil
+            self.clearRawCandidates()
             self.kanaKanjiConverter.stopComposition()
             return
         }
         // ユーザ辞書情報の更新
-        var userDictionary: [DicdataElement] = userDictionary.items.map {
+        var userDictionary: [DicdataElement] = cachedUserDictionary.items.map {
             .init(word: $0.word, ruby: $0.reading.toKatakana(), cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -5)
         }
         self.appendDebugMessage("userDictionaryCount: \(userDictionary.count)")
-        let systemUserDictionary: [DicdataElement] = systemUserDictionary.items.map {
+        let systemUserDictionary: [DicdataElement] = cachedSystemUserDictionary.items.map {
             .init(word: $0.word, ruby: $0.reading.toKatakana(), cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -5)
         }
         self.appendDebugMessage("systemUserDictionaryCount: \(systemUserDictionary.count)")
         userDictionary.append(contentsOf: consume systemUserDictionary)
 
-        /// 日付・時刻変換を事前に入れておく
-        let dynamicShortcuts: [DicdataElement] =
-            [
-                ("M/d", -18, DateTemplateLiteral.CalendarType.western),
-                ("yyyy/MM/dd", -18.1, .western),
-                ("yyyy-MM-dd", -18.2, .western),
-                ("M月d日（E）", -18.3, .western),
-                ("yyyy年M月d日", -18.4, .western),
-                ("Gyyyy年M月d日", -18.5, .japanese),
-                ("E曜日", -18.6, .western)
-            ].flatMap { (format, value: PValue, type) in
-                [
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-2", deltaUnit: 60 * 60 * 24).export(), ruby: "オトトイ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-1", deltaUnit: 60 * 60 * 24).export(), ruby: "キノウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "キョウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "1", deltaUnit: 60 * 60 * 24).export(), ruby: "アシタ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "2", deltaUnit: 60 * 60 * 24).export(), ruby: "アサッテ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value)
-                ]
-            } + [
-                // 月
-                .init(word: DateTemplateLiteral(format: "MM月", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コンゲツ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
-                // 年
-                .init(word: DateTemplateLiteral(format: "yyyy年", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
-                .init(word: DateTemplateLiteral(format: "Gyyyy年", type: .japanese, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18.1)
-            ]
+        /// 日付・時刻変換を事前に入れておく（テンプレートリテラルはキャッシュ済み）
+        let dynamicShortcuts = self.cachedDynamicShortcuts
 
         self.kanaKanjiConverter.importDynamicUserDictionary(consume userDictionary, shortcuts: dynamicShortcuts)
 
@@ -456,7 +538,7 @@ public final class SegmentsManager {
                 requireEnglishPrediction: Config.DebugPredictiveTyping().value ? .manualMix : .disabled
             )
         )
-        self.rawCandidates = result
+        self.setRawCandidates(result)
     }
 
     @MainActor public func update(requestRichCandidates: Bool) {
@@ -467,7 +549,7 @@ public final class SegmentsManager {
     /// - note: 画面更新との整合性を保つため、この関数の実行前に左文脈を取得し、これを引数として与える
     @MainActor public func prefixCandidateCommited(_ candidate: Candidate, leftSideContext: String) {
         self.kanaKanjiConverter.setCompletedData(candidate)
-        self.kanaKanjiConverter.updateLearningData(candidate)
+        self.updateLearningDataAsync(candidate)
         self.composingText.prefixComplete(composingCount: candidate.composingCount)
 
         if !self.composingText.isEmpty {
@@ -635,6 +717,17 @@ public final class SegmentsManager {
         )
     }
 
+    /// composingText.input から生のローマ字入力文字列を取得する
+    private func getRawInputString() -> String {
+        String(self.composingText.input.compactMap {
+            switch $0.piece {
+            case .compositionSeparator: nil
+            case .character(let c): c
+            case .key(intention: _, input: let input, modifiers: _): input
+            }
+        })
+    }
+
     @MainActor
     public func getModifiedRomanCandidate(inputState: InputState = .composing, _ transform: (String) -> String) -> Candidate {
         let targetComposingText: ComposingText
@@ -711,7 +804,10 @@ public final class SegmentsManager {
         let markedText = self.getCurrentMarkedText(inputState: inputState)
         let text = markedText.reduce(into: "") {$0.append(contentsOf: $1.content)}
         if let candidate = self.candidates?.first(where: {$0.text == text}) {
-            self.prefixCandidateCommited(candidate, leftSideContext: "")
+            // 学習データのみ更新し、prefixCandidateCommited は呼ばない。
+            // 直後に stopComposition() するため、updateRawCandidate の結果は使われない。
+            self.kanaKanjiConverter.setCompletedData(candidate)
+            self.updateLearningDataAsync(candidate)
         }
         self.stopComposition()
         return text
@@ -726,6 +822,46 @@ public final class SegmentsManager {
     // サジェスト候補の選択状態をリセット
     public func resetSuggestionSelection() {
         suggestSelectionIndex = nil
+    }
+
+    // MARK: - Prediction Selection
+
+    /// 現在選択されている予測候補のインデックス
+    public var selectedPredictionIndex: Int? {
+        predictionSelectionIndex
+    }
+
+    /// 次の予測候補を選択
+    /// - Parameter count: 予測候補の総数
+    public func requestSelectingNextPrediction(count: Int) {
+        guard count > 0 else {
+            return
+        }
+        if let current = predictionSelectionIndex {
+            // 範囲外の場合は最後の候補にとどまる
+            predictionSelectionIndex = min(current + 1, count - 1)
+        } else {
+            predictionSelectionIndex = 0
+        }
+    }
+
+    /// 前の予測候補を選択
+    public func requestSelectingPrevPrediction() {
+        guard let current = predictionSelectionIndex else {
+            // nilからはnilのまま
+            return
+        }
+        if current <= 0 {
+            // 0以下の場合はnilにリセット
+            predictionSelectionIndex = nil
+        } else {
+            predictionSelectionIndex = current - 1
+        }
+    }
+
+    /// 予測候補の選択状態をリセット
+    public func resetPredictionSelection() {
+        predictionSelectionIndex = nil
     }
 
     public func requestPredictionCandidates() -> [PredictionCandidate] {
@@ -743,35 +879,152 @@ public final class SegmentsManager {
            last.unicodeScalars.allSatisfy({ $0.isASCII && CharacterSet.letters.contains($0) }) {
             matchTarget.removeLast()
         }
-        guard matchTarget.count >= 2 else {
+        guard matchTarget.count >= 1 else {
             return []
         }
         matchTarget = matchTarget.toHiragana()
 
+        let maxPredictionCount = 5
+        var results: [PredictionCandidate] = []
+        var seenDisplayTexts: Set<String> = []
+
+        // 生のローマ字入力文字列を取得（英字読みマッチ用）
+        let rawInputString = self.getRawInputString().lowercased()
+
+        // ユーザー辞書から直接英字読みのエントリを検索（最優先）
+        // (変換エンジンはひらがな入力から英字読みにマッチできないため、先に検索する)
+        // rawCandidates に依存しないため、非同期変換完了前でも結果を返せる
+        if rawInputString.count >= 2 {
+            let allUserDictionaryItems = cachedUserDictionary.items + cachedSystemUserDictionary.items
+            for entry in allUserDictionaryItems {
+                guard results.count < maxPredictionCount else {
+                    break
+                }
+
+                let reading = entry.reading
+                // 読みが全てASCIIの場合のみ
+                guard reading.unicodeScalars.allSatisfy({ $0.isASCII }) else {
+                    continue
+                }
+
+                let readingLower = reading.lowercased()
+                guard readingLower.hasPrefix(rawInputString),
+                      rawInputString.count < readingLower.count,
+                      !seenDisplayTexts.contains(entry.word) else {
+                    continue
+                }
+
+                let appendText = String(readingLower.dropFirst(rawInputString.count))
+                if !appendText.isEmpty {
+                    results.append(.init(
+                        displayText: entry.word,
+                        appendText: appendText,
+                        isEnglishReading: true,
+                        fullText: entry.word
+                    ))
+                    seenDisplayTexts.insert(entry.word)
+                }
+            }
+        }
+
+        // ユーザー辞書からひらがな読みのエントリも検索（rawCandidates 不要）
+        do {
+            let allUserDictionaryItems = cachedUserDictionary.items + cachedSystemUserDictionary.items
+            for entry in allUserDictionaryItems {
+                guard results.count < maxPredictionCount else {
+                    break
+                }
+
+                let reading = entry.reading
+                // ひらがな読みのみ（英字読みは上で処理済み）
+                guard !reading.unicodeScalars.allSatisfy({ $0.isASCII }) else {
+                    continue
+                }
+
+                let readingHiragana = reading.toHiragana()
+                guard readingHiragana.hasPrefix(matchTarget),
+                      matchTarget.count < readingHiragana.count,
+                      !seenDisplayTexts.contains(entry.word) else {
+                    continue
+                }
+
+                let appendText = String(readingHiragana.dropFirst(matchTarget.count))
+                if !appendText.isEmpty {
+                    results.append(.init(
+                        displayText: entry.word,
+                        appendText: appendText,
+                        isEnglishReading: false,
+                        fullText: entry.word
+                    ))
+                    seenDisplayTexts.insert(entry.word)
+                }
+            }
+        }
+
         guard let rawCandidates else {
-            return []
+            return results
         }
 
-        for candidate in rawCandidates.predictionResults {
-            let reading = candidateReading(candidate)
-            guard !reading.isEmpty else {
-                continue
+        // 候補処理のヘルパー関数
+        func processCandidates(_ candidates: [Candidate]) {
+            for candidate in candidates {
+                guard results.count < maxPredictionCount else {
+                    return
+                }
+
+                let reading = candidateReading(candidate)
+                guard !reading.isEmpty else {
+                    continue
+                }
+
+                // 1. 既存のひらがなマッチロジック
+                let readingHiragana = reading.toHiragana()
+                if readingHiragana.hasPrefix(matchTarget), matchTarget.count < readingHiragana.count {
+                    let appendText = String(readingHiragana.dropFirst(matchTarget.count))
+                    if !appendText.isEmpty && !seenDisplayTexts.contains(candidate.text) {
+                        results.append(.init(
+                            displayText: candidate.text,
+                            appendText: appendText,
+                            isEnglishReading: false,
+                            fullText: candidate.text
+                        ))
+                        seenDisplayTexts.insert(candidate.text)
+                        continue
+                    }
+                }
+
+                // 2. 生のローマ字入力での英字読みマッチ
+                // readingが全てASCIIの場合のみマッチを試みる
+                if reading.unicodeScalars.allSatisfy({ $0.isASCII }) {
+                    let readingLower = reading.lowercased()
+                    if rawInputString.count >= 2,
+                       readingLower.hasPrefix(rawInputString),
+                       rawInputString.count < readingLower.count,
+                       !seenDisplayTexts.contains(candidate.text) {
+                        let appendText = String(readingLower.dropFirst(rawInputString.count))
+                        if !appendText.isEmpty {
+                            results.append(.init(
+                                displayText: candidate.text,
+                                appendText: appendText,
+                                isEnglishReading: true,
+                                fullText: candidate.text
+                            ))
+                            seenDisplayTexts.insert(candidate.text)
+                        }
+                    }
+                }
             }
-            let readingHiragana = reading.toHiragana()
-            guard readingHiragana.hasPrefix(matchTarget) else {
-                continue
-            }
-            guard matchTarget.count < readingHiragana.count else {
-                continue
-            }
-            let appendText = String(readingHiragana.dropFirst(matchTarget.count))
-            guard !appendText.isEmpty else {
-                continue
-            }
-            return [.init(displayText: candidate.text, appendText: appendText)]
         }
 
-        return []
+        // predictionResults を処理
+        processCandidates(rawCandidates.predictionResults)
+
+        // mainResults からも候補を検索（ユーザー辞書エントリを含む）
+        if results.count < maxPredictionCount {
+            processCandidates(rawCandidates.mainResults)
+        }
+
+        return results
     }
 
     // swiftlint:disable:next cyclomatic_complexity
@@ -780,17 +1033,39 @@ public final class SegmentsManager {
         case .none, .attachDiacritic:
             return MarkedText(text: [], selectionRange: .notFound)
         case .composing:
-            let text = if self.lastOperation == .delete {
+            let text: String
+            if self.lastOperation == .delete {
                 // 削除のあとは常にひらがなを示す
-                self.composingText.convertTarget
+                text = self.composingText.convertTarget
             } else if self.liveConversionEnabled,
                       self.composingText.convertTarget.count > 1,
                       let firstCandidate = self.rawCandidates?.mainResults.first {
-                // それ以外の場合、ライブ変換が有効なら
-                firstCandidate.text
+                let currentTarget = self.composingText.convertTarget
+                if currentTarget == self.rawCandidatesConvertTarget {
+                    // Fresh: rawCandidates は現在の入力に対して生成されたもの
+                    text = firstCandidate.text
+                } else if let staleTarget = self.rawCandidatesConvertTarget {
+                    // Stale: 末尾の未確定ローマ字を除去して確定済みかな部分で比較
+                    let settledStale = staleTarget.droppingTrailingRomanLetters()
+                    let settledCurrent = currentTarget.droppingTrailingRomanLetters()
+                    if !settledStale.isEmpty, settledCurrent.hasPrefix(settledStale) {
+                        // 確定済みかな部分に前方一致 → ハイブリッド表示
+                        // 候補テキストの末尾ローマ字も除去する（例: "会g" → "会"）
+                        let candidateBase = firstCandidate.text.droppingTrailingRomanLetters()
+                        let kanaSuffix = String(settledCurrent.dropFirst(settledStale.count))
+                        let trailingRoman = String(currentTarget.dropFirst(settledCurrent.count))
+                        text = candidateBase + kanaSuffix + trailingRoman
+                    } else {
+                        // 前方一致しない → ひらがなフォールバック
+                        text = currentTarget
+                    }
+                } else {
+                    // rawCandidatesConvertTarget が nil → ひらがなフォールバック
+                    text = currentTarget
+                }
             } else {
                 // それ以外
-                self.composingText.convertTarget
+                text = self.composingText.convertTarget
             }
             return MarkedText(text: [.init(content: text, focus: .none)], selectionRange: .notFound)
         case .previewing:
@@ -842,6 +1117,7 @@ public final class SegmentsManager {
 
 public protocol SegmentManagerDelegate: AnyObject {
     func getLeftSideContext(maxCount: Int) -> String?
+    @MainActor func conversionCompleted()
 }
 
 private extension ComposingText {
@@ -849,5 +1125,16 @@ private extension ComposingText {
         var c = self
         c.prefixComplete(composingCount: composingCount)
         return c.isEmpty
+    }
+}
+
+private extension String {
+    /// 末尾の未確定ローマ字（ASCII英字）を除去した文字列を返す
+    func droppingTrailingRomanLetters() -> String {
+        var result = self
+        while let last = result.last, last.isASCII, last.isLetter {
+            result.removeLast()
+        }
+        return result
     }
 }
